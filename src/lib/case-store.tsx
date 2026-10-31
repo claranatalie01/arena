@@ -34,6 +34,7 @@ export interface CaseState {
   verified: boolean;
   askedOnce: boolean;
   clock: number;
+  epoch: number;
 }
 
 export type Action =
@@ -61,6 +62,7 @@ function init(scen: ScenarioKey): CaseState {
     verified: false,
     askedOnce: false,
     clock: 0,
+    epoch: 0,
   };
   return withLog(s, "System", `Case created from customer contact. ${NCCO} is the NCCO.`);
 }
@@ -86,7 +88,7 @@ const allResolved = (s: CaseState) => {
 };
 
 function reducer(prev: CaseState, a: Action): CaseState {
-  if (a.type === "reset") return init(a.scen);
+  if (a.type === "reset") return { ...init(a.scen), epoch: prev.epoch + 1 };
   let s: CaseState = { ...prev, sc: structuredClone(prev.sc) };
   const t = "id" in a ? s.sc.tasks.find((x) => x.id === a.id) : undefined;
 

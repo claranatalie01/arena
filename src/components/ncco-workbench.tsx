@@ -2,31 +2,83 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Notice, Pill, StatusPill } from "@/components/pill";
-import {
-  approvedTasks,
-  missingFields,
-  packComplete,
-  useCase,
-} from "@/lib/case-store";
-import { CONF_THRESHOLD, NCCO, SCENARIOS, type ScenarioKey } from "@/lib/data";
+import { approvedTasks, missingFields, packComplete, useCase, type Stage } from "@/lib/case-store";
+import { CONF_THRESHOLD } from "@/lib/data";
 
-const stageLabel = { planning: "Planning", active: "Teams working", closing: "Closing check", closed: "Closed" } as const;
+type Step = "plan" | "send" | "working" | "close";
 
-function StepTitle({ n, children }: { n: number; children: React.ReactNode }) {
+const STEPS: { key: Step; label: string }[] = [
+  { key: "plan", label: "Plan" },
+  { key: "send", label: "Send" },
+  { key: "working", label: "Working" },
+  { key: "close", label: "Close" },
+];
+
+const stageLabel: Record<Stage, string> = { planning: "Planning", active: "Teams working", closing: "Closing check", closed: "Closed" };
+const defaultStep: Record<Stage, Step> = { planning: "plan", active: "working", closing: "close", closed: "close" };
+const stepRank: Record<Step, number> = { plan: 0, send: 1, working: 2, close: 3 };
+const stageRank: Record<Stage, number> = { planning: 0, active: 2, closing: 3, closed: 4 };
+
+function Stepper({
+  step,
+  stage,
+  reachable,
+  openRequests,
+  onPick,
+}: {
+  step: Step;
+  stage: Stage;
+  reachable: (k: Step) => boolean;
+  openRequests: number;
+  onPick: (s: Step) => void;
+}) {
+  const done = (k: Step) => stageRank[stage] > stepRank[k] || stepRank[k] < stepRank[step];
   return (
-    <CardTitle className="flex flex-wrap items-center gap-2">
-      <span className="inline-flex size-5 items-center justify-center rounded-full bg-primary text-[11px] font-bold text-primary-foreground">
-        {n}
-      </span>
+    <ol className="flex items-center gap-1 text-sm" aria-label="Case progress">
+      {STEPS.map((st, i) => {
+        const active = st.key === step;
+        const isDone = done(st.key) && (!active || stage === "closed");
+        return (
+          <li key={st.key} className="flex flex-1 items-center gap-1">
+            <button
+              type="button"
+              disabled={!reachable(st.key)}
+              aria-current={active ? "step" : undefined}
+              onClick={() => onPick(st.key)}
+              className={`flex items-center gap-2 rounded-full px-2.5 py-1 transition-colors disabled:cursor-default ${
+                active ? "bg-primary text-primary-foreground" : reachable(st.key) ? "hover:bg-muted" : "text-muted-foreground"
+              }`}
+            >
+              <span
+                className={`inline-flex size-5 items-center justify-center rounded-full text-[11px] font-bold ${
+                  isDone ? "bg-green-600 text-white" : active ? "bg-primary-foreground/20" : "border"
+                }`}
+              >
+                {isDone ? "✓" : i + 1}
+              </span>
+              <span className="font-medium">{st.label}</span>
+              {st.key === "working" && openRequests > 0 && <span className="rounded-full bg-amber-500 px-1.5 text-[11px] font-semibold text-white">{openRequests}</span>}
+            </button>
+            {i < STEPS.length - 1 && <span className="h-px flex-1 bg-border" aria-hidden />}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function Footer({ children, hint }: { children: React.ReactNode; hint?: React.ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-center justify-end gap-3 border-t pt-3">
+      {hint && <span className="mr-auto text-xs text-muted-foreground">{hint}</span>}
       {children}
-    </CardTitle>
+    </div>
   );
 }
 
@@ -38,277 +90,280 @@ export function NccoWorkbench() {
   const allPack = ap.length > 0 && ap.every(packComplete);
   const missAll = ap.flatMap((t) => missingFields(t).map((f) => ({ t, f })));
   const reqTasks = sc.tasks.filter((t) => t.req);
+  const openReqs = reqTasks.filter((t) => t.req?.status === "open").length;
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [replies, setReplies] = useState<Record<string, string>>({});
-  const scenItems = (Object.keys(SCENARIOS) as ScenarioKey[]).map((k) => ({ value: k, label: SCENARIOS[k].label }));
+  const [picked, setPicked] = useState<{ step: Step; at: Step } | null>(null);
+
+  const current = defaultStep[s.stage];
+  const reachable = (k: Step) => k === "plan" || (k === "send" && ap.length > 0) || (k === "working" && s.stage !== "planning") || (k === "close" && (s.stage === "closing" || s.stage === "closed"));
+  // A manual pick only holds until the case moves to a new default step.
+  const step = picked && picked.at === current && reachable(picked.step) ? picked.step : current;
+  const go = (k: Step) => setPicked({ step: k, at: current });
 
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader>
-          <CardTitle className="flex flex-wrap items-center gap-2">
-            Case {sc.caseId}
+        <CardContent className="space-y-3">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <h2 className="text-base font-semibold">Case {sc.caseId}</h2>
             <Pill>{sc.segment}</Pill>
-            <Pill>{sc.channel}</Pill>
-            <Pill>{sc.category}</Pill>
-            <Pill>{sc.complexity} complexity</Pill>
-            <Pill tone="teal">NCCO: {NCCO} (Customer Service)</Pill>
             <Pill tone={s.stage === "closed" ? "green" : "blue"}>{stageLabel[s.stage]}</Pill>
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-wrap items-center gap-2 text-sm">
-          <span className="text-muted-foreground">Demo scenario</span>
-          <Select
-            items={scenItems}
-            value={s.scen}
-            onValueChange={(v) => {
-              if (v) {
-                setAnswers({});
-                setReplies({});
-                dispatch({ type: "reset", scen: v as ScenarioKey });
-              }
-            }}
-          >
-            <SelectTrigger size="sm" className="min-w-72">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {scenItems.map((i) => (
-                <SelectItem key={i.value} value={i.value}>
-                  {i.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            <span className="text-xs text-muted-foreground">
+              {sc.category} {"·"} {sc.channel}
+            </span>
+          </div>
+          <Stepper step={step} stage={s.stage} reachable={reachable} openRequests={openReqs} onPick={go} />
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader>
-          <StepTitle n={1}>Customer contact (original wording kept)</StepTitle>
-        </CardHeader>
-        <CardContent className="space-y-2 text-sm">
+        <CardContent className="space-y-2">
+          <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Customer said</div>
           {sc.wording.map((w) => (
-            <blockquote key={w} className="border-l-2 pl-3 text-muted-foreground">
+            <blockquote key={w} className="border-l-2 pl-3 text-sm">
               {"“"}
               {w}
               {"”"}
             </blockquote>
           ))}
-          <p className="text-xs text-muted-foreground">
-            {NCCO} becomes the NCCO at intake and stays the customer{"’"}s single contact until close, even when tasks move between teams.
-          </p>
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <StepTitle n={2}>
-            AI task plan <span className="text-xs font-normal italic text-muted-foreground">simulated output, no model call</span>
-          </StepTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <p className="text-sm text-muted-foreground">
-            AI splits the complaint into tasks and suggests a team for each. <b>The NCCO approves, edits or rejects.</b> Confidence below {CONF_THRESHOLD} is flagged for review.
-          </p>
-          {sc.tasks.map((t) => {
-            const low = t.conf < CONF_THRESHOLD;
-            const depItems = [{ value: "none", label: "no dependency" }, ...sc.tasks.filter((x) => x.id !== t.id).map((x) => ({ value: x.id, label: `Task ${x.id}` }))];
-            return (
-              <div key={t.id} className={`rounded-lg border p-3 ${low || t.risk ? "border-amber-400" : ""}`}>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-sm">
+      {step === "plan" && (
+        <Card>
+          <CardContent className="space-y-3">
+            <div className="flex items-baseline gap-2">
+              <h3 className="font-semibold">Review the task plan</h3>
+              <span className="text-xs text-muted-foreground">AI suggestion (simulated)</span>
+            </div>
+            {sc.tasks.map((t) => {
+              const low = t.conf < CONF_THRESHOLD;
+              const depItems = [{ value: "none", label: "no dependency" }, ...sc.tasks.filter((x) => x.id !== t.id).map((x) => ({ value: x.id, label: `Task ${x.id}` }))];
+              return (
+                <div key={t.id} className={`rounded-lg border p-3 ${low || t.risk ? "border-amber-400" : ""}`}>
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
                     <b>
-                      Task {t.id}: {t.title}
+                      {t.id}. {t.title}
                     </b>
-                    <Pill tone={t.priority === "High" ? "red" : "muted"}>{t.priority} priority</Pill>
-                  </div>
-                  <div className="flex items-center gap-2 text-xs">
-                    <span>
-                      {"→"} <b>{t.team}</b>
+                    {t.priority === "High" && <Pill tone="red">High priority</Pill>}
+                    <span className="ml-auto flex items-center gap-2 text-xs">
+                      <span>
+                        {"→"} <b>{t.team}</b>
+                      </span>
+                      {low ? <Pill tone="amber">{Math.round(t.conf * 100)}% · check team</Pill> : <span className="text-muted-foreground">{Math.round(t.conf * 100)}%</span>}
                     </span>
-                    <Progress value={t.conf * 100} className="w-20" />
-                    <span>{t.conf.toFixed(2)}</span>
+                  </div>
+                  {t.risk && <Notice tone="amber">{t.risk}</Notice>}
+                  <details className="mt-1 text-xs text-muted-foreground">
+                    <summary className="w-fit cursor-pointer select-none hover:text-foreground">Why this team?</summary>
+                    <p className="mt-1">{t.why}</p>
+                  </details>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <Button size="sm" variant={t.approved ? "outline" : "default"} disabled={locked} onClick={() => dispatch({ type: "approve", id: t.id })}>
+                      {t.approved ? "Approved ✓" : "Approve"}
+                    </Button>
+                    {t.approved && sc.tasks.length > 1 && t.id !== "A" && (
+                      <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                        Start after
+                        <Select
+                          items={depItems}
+                          value={t.after ?? "none"}
+                          disabled={locked}
+                          onValueChange={(v) => v && dispatch({ type: "setAfter", id: t.id, after: v === "none" ? null : v })}
+                        >
+                          <SelectTrigger size="sm">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {depItems.map((i) => (
+                              <SelectItem key={i.value} value={i.value}>
+                                {i.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+                    {t.status !== "draft" && <StatusPill task={t} />}
                   </div>
                 </div>
-                <p className="my-2 text-xs text-muted-foreground">Why: {t.why}</p>
-                {t.risk && <Notice tone="amber">{t.risk}</Notice>}
-                {low && !t.risk && <Notice tone="amber">Below threshold: NCCO to confirm this split and team before sending.</Notice>}
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    variant={t.approved ? "outline" : "default"}
-                    disabled={locked}
-                    onClick={() => dispatch({ type: "approve", id: t.id })}
-                  >
-                    {t.approved ? "Approved ✓ (click to undo)" : "Approve task"}
-                  </Button>
-                  {sc.tasks.length > 1 && t.id !== "A" && (
-                    <div className="flex items-center gap-1 text-xs">
-                      <span>Starts after</span>
-                      <Select
-                        items={depItems}
-                        value={t.after ?? "none"}
-                        disabled={locked}
-                        onValueChange={(v) => v && dispatch({ type: "setAfter", id: t.id, after: v === "none" ? null : v })}
-                      >
-                        <SelectTrigger size="sm">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {depItems.map((i) => (
-                            <SelectItem key={i.value} value={i.value}>
-                              {i.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  )}
-                  <StatusPill task={t} />
-                </div>
-              </div>
-            );
-          })}
-        </CardContent>
-      </Card>
+              );
+            })}
+            <Footer hint={ap.length === 0 ? "Approve at least one task to continue." : `${ap.length} of ${sc.tasks.length} approved`}>
+              <Button disabled={ap.length === 0} onClick={() => go("send")}>
+                Continue to handoff
+              </Button>
+            </Footer>
+          </CardContent>
+        </Card>
+      )}
 
-      <Card>
-        <CardHeader>
-          <StepTitle n={3}>
-            Handoff Pack <span className="text-xs font-normal text-muted-foreground">required fields must exist before routing</span>
-          </StepTitle>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm">
-          {!ap.length && <p className="text-muted-foreground">Approve at least one task above to check its Handoff Pack.</p>}
-          {ap.map((t) => (
-            <div key={t.id}>
-              <div className="mb-1 flex items-center gap-2 font-semibold">
-                Task {t.id} {"→"} {t.team}
-                {packComplete(t) ? <Pill tone="green">complete</Pill> : <Pill tone="red">{missingFields(t).length} missing</Pill>}
-              </div>
-              {t.fields.map((f) => (
-                <div key={f.k} className="flex flex-wrap items-center gap-2 border-b border-dashed py-1">
-                  <span className="min-w-40 font-medium">{f.label}</span>
-                  {f.val ? <span className="text-green-700 dark:text-green-400">{"✓"} {f.val}</span> : <span className="font-semibold text-red-600 dark:text-red-400">{"✗"} missing</span>}
+      {step === "send" && (
+        <Card>
+          <CardContent className="space-y-3">
+            <h3 className="font-semibold">Check the handoff</h3>
+            {ap.map((t) => {
+              const miss = missingFields(t);
+              return (
+                <div key={t.id} className="text-sm">
+                  <div className="flex flex-wrap items-center gap-2 font-medium">
+                    {t.id}. {t.title} {"→"} {t.team}
+                    {miss.length === 0 ? <Pill tone="green">complete</Pill> : <Pill tone="red">{miss.length} missing</Pill>}
+                  </div>
+                  <div className="mt-1 grid gap-x-6 gap-y-0.5 sm:grid-cols-2">
+                    {t.fields.map((f) => (
+                      <div key={f.k} className="flex gap-2 text-xs">
+                        <span className="text-muted-foreground">{f.label}</span>
+                        {f.val ? <span className="text-green-700 dark:text-green-400">{"✓"} {f.val}</span> : <span className="font-semibold text-red-600 dark:text-red-400">{"✗"} missing</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+            {!locked && missAll.length > 0 && (
+              <Notice tone="blue">
+                <b>Ask the customer once</b>
+                <div className="mt-2 space-y-2">
+                  {missAll.map(({ t, f }) => {
+                    const key = `${t.id}|${f.k}`;
+                    return (
+                      <div key={key} className="flex flex-wrap items-center gap-2">
+                        <Label className="min-w-48">
+                          {t.id} {"–"} {f.label}
+                        </Label>
+                        <Input
+                          className="max-w-72 bg-background"
+                          placeholder="Customer's answer"
+                          value={answers[key] ?? ""}
+                          onChange={(e) => setAnswers((a) => ({ ...a, [key]: e.target.value }))}
+                        />
+                      </div>
+                    );
+                  })}
+                  <Button
+                    onClick={() => {
+                      dispatch({
+                        type: "fill",
+                        answers: Object.entries(answers).map(([key, val]) => {
+                          const [id, k] = key.split("|");
+                          return { id, k, val };
+                        }),
+                      });
+                      setAnswers({});
+                    }}
+                  >
+                    Record answers
+                  </Button>
+                </div>
+              </Notice>
+            )}
+            <Footer hint={locked ? "Already sent." : allPack ? undefined : `${missAll.length} item${missAll.length === 1 ? "" : "s"} still missing`}>
+              <Button variant="outline" disabled={locked} onClick={() => go("plan")}>
+                Back
+              </Button>
+              <Button
+                className="bg-teal-700 text-white hover:bg-teal-800"
+                disabled={locked || !allPack}
+                onClick={() => {
+                  setPicked(null);
+                  dispatch({ type: "send" });
+                }}
+              >
+                Send to teams
+              </Button>
+            </Footer>
+          </CardContent>
+        </Card>
+      )}
+
+      {step === "working" && (
+        <Card>
+          <CardContent className="space-y-3">
+            <h3 className="font-semibold">Teams are working</h3>
+            <ul className="divide-y text-sm">
+              {ap.map((t) => (
+                <li key={t.id} className="flex flex-wrap items-center gap-2 py-2">
+                  <b>
+                    {t.id}. {t.title}
+                  </b>
+                  <span className="text-xs text-muted-foreground">
+                    {t.team}
+                    {t.assignee ? ` · ${t.assignee}` : ""}
+                  </span>
+                  <span className="ml-auto">
+                    <StatusPill task={t} />
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <div className="space-y-2">
+              <h4 className="text-sm font-semibold">Questions from teams {openReqs > 0 && <Pill tone="amber">{openReqs} open</Pill>}</h4>
+              {!reqTasks.length && <p className="text-sm text-muted-foreground">None yet.</p>}
+              {reqTasks.map((t) => (
+                <div key={t.id} className={`rounded-lg border p-3 text-sm ${t.req?.status === "open" ? "border-amber-400" : ""}`}>
+                  <div>
+                    <b>
+                      {t.id}. {t.team}
+                      {t.assignee ? ` (${t.assignee})` : ""}
+                    </b>{" "}
+                    needs <b>{t.req!.field}</b>
+                  </div>
+                  <div className="text-xs text-muted-foreground">{t.req!.why}</div>
+                  {t.req!.status === "open" ? (
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <Input
+                        className="max-w-64"
+                        placeholder="Customer's answer"
+                        value={replies[t.id] ?? ""}
+                        onChange={(e) => setReplies((r) => ({ ...r, [t.id]: e.target.value }))}
+                      />
+                      <Button
+                        onClick={() => {
+                          const v = (replies[t.id] ?? "").trim();
+                          if (v) {
+                            dispatch({ type: "answer", id: t.id, val: v });
+                            setReplies((r) => ({ ...r, [t.id]: "" }));
+                          }
+                        }}
+                      >
+                        Log answer
+                      </Button>
+                    </div>
+                  ) : (
+                    <Notice tone="green">Answered: {t.req!.answer}</Notice>
+                  )}
                 </div>
               ))}
             </div>
-          ))}
-          {!locked && missAll.length > 0 && (
-            <Notice tone="blue">
-              <b>Ask the customer once.</b> One consolidated question covers every missing item across all tasks.
-              <div className="mt-2 space-y-2">
-                {missAll.map(({ t, f }) => {
-                  const key = `${t.id}|${f.k}`;
-                  return (
-                    <div key={key} className="flex flex-wrap items-center gap-2">
-                      <Label className="min-w-56">
-                        Task {t.id} {"–"} {f.label}
-                      </Label>
-                      <Input
-                        className="max-w-72"
-                        placeholder="enter the customer's answer"
-                        value={answers[key] ?? ""}
-                        onChange={(e) => setAnswers((a) => ({ ...a, [key]: e.target.value }))}
-                      />
-                    </div>
-                  );
-                })}
-                <Button
-                  onClick={() => {
-                    dispatch({
-                      type: "fill",
-                      answers: Object.entries(answers).map(([key, val]) => {
-                        const [id, k] = key.split("|");
-                        return { id, k, val };
-                      }),
-                    });
-                    setAnswers({});
-                  }}
-                >
-                  Contact customer and record answers
-                </Button>
-              </div>
-            </Notice>
-          )}
-          <div className="flex flex-wrap items-center gap-2 pt-1">
-            <Button className="bg-teal-700 text-white hover:bg-teal-800" disabled={locked || !allPack} onClick={() => dispatch({ type: "send" })}>
-              Send approved tasks to teams
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              {locked ? "Already sent." : allPack ? "Handoff Packs complete." : "Blocked until every approved task has a complete Handoff Pack. The customer is never sent back to retell."}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
-      <Card>
-        <CardHeader>
-          <StepTitle n={4}>
-            Info Request inbox <span className="text-xs font-normal text-muted-foreground">specialists ask you, you ask the customer</span>
-          </StepTitle>
-        </CardHeader>
-        <CardContent className="space-y-2 text-sm">
-          {!reqTasks.length && <p className="text-muted-foreground">No requests. Specialists never contact the customer directly. If they need more, it appears here.</p>}
-          {reqTasks.map((t) => (
-            <div key={t.id} className={`rounded-lg border p-3 ${t.req?.status === "open" ? "border-amber-400" : ""}`}>
-              <div>
-                <b>
-                  Task {t.id} ({t.team}
-                  {t.assignee ? `, ${t.assignee}` : ""})
-                </b>{" "}
-                needs: <b>{t.req!.field}</b>
-              </div>
-              <div className="text-xs text-muted-foreground">Reason: {t.req!.why}</div>
-              {t.req!.status === "open" ? (
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <Input
-                    className="max-w-64"
-                    placeholder="customer's answer, then log it"
-                    value={replies[t.id] ?? ""}
-                    onChange={(e) => setReplies((r) => ({ ...r, [t.id]: e.target.value }))}
-                  />
-                  <Button
-                    onClick={() => {
-                      const v = (replies[t.id] ?? "").trim();
-                      if (v) {
-                        dispatch({ type: "answer", id: t.id, val: v });
-                        setReplies((r) => ({ ...r, [t.id]: "" }));
-                      }
-                    }}
-                  >
-                    Contact customer and log answer
+      {step === "close" && (
+        <Card>
+          <CardContent className="space-y-3">
+            <h3 className="font-semibold">Close the case</h3>
+            {s.stage === "closed" ? (
+              <Notice tone="green">Case closed.</Notice>
+            ) : (
+              <>
+                <p className="text-sm text-muted-foreground">All tasks are resolved. Confirm the customer{"’"}s outcome before closing.</p>
+                <label className="flex items-center gap-2 text-sm">
+                  <Checkbox checked={s.closeOk} onCheckedChange={(c) => dispatch({ type: "setCloseOk", value: c === true })} />
+                  I confirmed the outcome with the customer
+                </label>
+                <Footer>
+                  <Button className="bg-teal-700 text-white hover:bg-teal-800" disabled={!s.closeOk} onClick={() => dispatch({ type: "close" })}>
+                    Close case
                   </Button>
-                </div>
-              ) : (
-                <Notice tone="green">Answered: {t.req!.answer}. Returned to the task.</Notice>
-              )}
-            </div>
-          ))}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <StepTitle n={5}>Closing check</StepTitle>
-        </CardHeader>
-        <CardContent className="text-sm">
-          {s.stage === "closed" && <Notice tone="green">Case closed.</Notice>}
-          {s.stage === "closing" && (
-            <div className="space-y-3">
-              <Notice tone="blue">All tasks are resolved. Confirm the customer{"’"}s outcome before closing (internal completion and customer outcome can differ).</Notice>
-              <label className="flex items-center gap-2">
-                <Checkbox checked={s.closeOk} onCheckedChange={(c) => dispatch({ type: "setCloseOk", value: c === true })} />
-                I confirmed the outcome with the customer
-              </label>
-              <Button className="bg-teal-700 text-white hover:bg-teal-800" disabled={!s.closeOk} onClick={() => dispatch({ type: "close" })}>
-                Close case
-              </Button>
-            </div>
-          )}
-          {s.stage !== "closed" && s.stage !== "closing" && <p className="text-muted-foreground">Available when every approved task is marked resolved by its team.</p>}
-        </CardContent>
-      </Card>
+                </Footer>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
